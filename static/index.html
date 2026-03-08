@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>yt-dlp Fetch</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Noto+Sans+SC:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="card">
+        <div class="brand-row">
+          <span class="brand-dot"></span>
+          <h1>yt-dlp Fetch</h1>
+        </div>
+        <p class="intro">粘贴支持的视频或音频链接，解析不同清晰度并直接下载到本地。</p>
+
+        <div class="content-grid">
+          <section class="sidebar">
+            <form id="fetch-form" class="fetch-form">
+              <label class="field">
+                <span class="field-label">视频链接 (URL)</span>
+                <input
+                  id="url"
+                  name="url"
+                  type="url"
+                  placeholder="https://www.youtube.com/watch?v=..."
+                  autocomplete="off"
+                  required
+                />
+              </label>
+
+              <label class="field">
+                <span class="field-label">认证方式</span>
+                <select id="cookie_source" name="cookie_source">
+                  <option value="none">无需认证</option>
+                  <option value="browser">读取本机浏览器 cookies</option>
+                  <option value="text">粘贴 / 上传 cookies.txt</option>
+                </select>
+              </label>
+
+              <label class="field hidden" id="browser-field">
+                <span class="field-label">浏览器</span>
+                <select id="browser" name="browser"></select>
+              </label>
+
+              <label class="field hidden" id="cookie-text-field">
+                <span class="field-label">cookies.txt 内容</span>
+                <textarea
+                  id="cookie_text"
+                  name="cookie_text"
+                  rows="6"
+                  placeholder="# Netscape HTTP Cookie File"
+                ></textarea>
+              </label>
+
+              <button id="resolve-button" class="primary-button" type="submit">开始解析</button>
+            </form>
+
+            <div id="status" class="status" aria-live="polite"></div>
+
+            <section class="environment-panel">
+              <div class="panel-head">
+                <h2>运行环境</h2>
+                <p id="support-summary"></p>
+              </div>
+              <div id="runtime-grid" class="runtime-grid"></div>
+              <div class="supported-platforms">
+                <span class="field-label">常见平台</span>
+                <div id="platform-chips" class="chip-row"></div>
+              </div>
+            </section>
+
+            <section class="notes">
+              <p id="oauth-tip" class="note"></p>
+              <p class="note">YouTube 高分辨率说明：页面现在会自动尝试通过本地 PO Token Provider 获取授权，不再需要手填 token。若 provider 未就绪，则会自动退回到稳定可下的公开格式。</p>
+              <p class="note">本地优先：默认适合在你自己的电脑上运行。前端可单独部署到 CF Pages，但下载 API 需要一个支持子进程的后端。</p>
+            </section>
+          </section>
+
+          <section class="main-panel">
+            <section id="result" class="result hidden">
+              <div class="video-meta">
+                <img id="thumbnail" alt="" class="thumbnail hidden" />
+                <div class="meta-copy">
+                  <h2 id="video-title"></h2>
+                  <p id="video-subtitle"></p>
+                  <div id="video-tags" class="chip-row"></div>
+                </div>
+              </div>
+              <div id="warnings" class="warnings"></div>
+
+              <section id="download-progress" class="progress-panel hidden">
+                <div class="panel-head">
+                  <h2>下载进度</h2>
+                  <p id="progress-status-text"></p>
+                </div>
+                <div class="progress-bar-track">
+                  <div id="progress-bar-fill" class="progress-bar-fill"></div>
+                </div>
+                <div class="progress-meta">
+                  <span id="progress-percent">0%</span>
+                  <span id="progress-detail">等待下载</span>
+                </div>
+              </section>
+
+              <div class="format-section">
+                <div class="section-head">
+                  <span class="field-label">视频清晰度</span>
+                  <span class="section-tip">直接显示当前站点可用的分辨率，标签中会区分直链和流媒体</span>
+                </div>
+                <div id="video-format-grid" class="format-grid"></div>
+              </div>
+
+              <div class="format-section">
+                <div class="section-head">
+                  <span class="field-label">仅音频</span>
+                  <span class="section-tip">适合播客、音乐和讲话类内容</span>
+                </div>
+                <div id="audio-format-grid" class="format-grid audio-grid"></div>
+              </div>
+            </section>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
