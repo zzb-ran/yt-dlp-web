@@ -58,12 +58,13 @@ body {
   letter-spacing: -0.05em;
 }
 
-.brand-dot {
-  width: 22px;
-  height: 22px;
-  border-radius: 999px;
-  background: #020202;
+.brand-logo {
+  width: clamp(52px, 5vw, 72px);
+  height: clamp(52px, 5vw, 72px);
   flex: none;
+  border-radius: 22px;
+  box-shadow: 0 16px 30px rgba(2, 2, 2, 0.14);
+  object-fit: cover;
 }
 
 .intro {
@@ -464,9 +465,10 @@ textarea {
     gap: 12px;
   }
 
-  .brand-dot {
-    width: 16px;
-    height: 16px;
+  .brand-logo {
+    width: 44px;
+    height: 44px;
+    border-radius: 16px;
   }
 
   .video-meta {
