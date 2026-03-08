@@ -34,6 +34,15 @@ OUTPUT_DIR = Path(tempfile.gettempdir()) / "ytfetch-downloads"
 AUTH_CACHE_DIR = Path(tempfile.gettempdir()) / "ytfetch-auth-cache"
 YTDLP_CACHE_DIR = Path(tempfile.gettempdir()) / "ytfetch-yt-dlp-cache"
 AUTH_TTL_SECONDS = 30 * 60
+COOKIE_RECOMMENDED_EXTRACTORS = {
+    "BiliBili",
+    "Facebook",
+    "Instagram",
+    "TikTok",
+    "Twitter",
+    "TikTokUser",
+    "TwitchVod",
+}
 
 
 class ExtractionError(RuntimeError):
@@ -53,7 +62,7 @@ def build_auth_context(request: ResolveRequest) -> Iterator[AuthContext]:
     if request.auth_token:
         cached_cookie_file = get_cached_cookie_file(request.auth_token)
         if not cached_cookie_file:
-            raise HTTPException(status_code=400, detail="认证缓存已过期，请重新解析一次")
+            raise HTTPException(status_code=400, detail="Cached authentication has expired. Resolve the link again.")
         yield AuthContext(cookie_file=str(cached_cookie_file))
         return
 
@@ -61,7 +70,7 @@ def build_auth_context(request: ResolveRequest) -> Iterator[AuthContext]:
     try:
         if request.cookie_source == "text":
             if not request.cookie_text or not request.cookie_text.strip():
-                raise HTTPException(status_code=400, detail="已选择 cookies 文本模式，但没有提供 cookies 内容")
+                raise HTTPException(status_code=400, detail="Cookie text mode was selected, but no cookies.txt content was provided.")
             with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as handle:
                 handle.write(request.cookie_text.strip())
                 cookie_file = handle.name
@@ -70,7 +79,7 @@ def build_auth_context(request: ResolveRequest) -> Iterator[AuthContext]:
 
         if request.cookie_source == "browser":
             if not request.browser:
-                raise HTTPException(status_code=400, detail="已选择浏览器 cookies 模式，但没有提供浏览器类型")
+                raise HTTPException(status_code=400, detail="Browser cookie mode was selected, but no browser type was provided.")
             yield AuthContext(browser=request.browser)
             return
 
@@ -93,9 +102,9 @@ def cache_browser_cookies(browser: str) -> str:
         jar = extract_cookies_from_browser(browser_name=browser)
         jar.save(str(cookie_path))
     except CookieLoadError as exc:
-        raise HTTPException(status_code=400, detail=f"读取浏览器 cookies 失败：{exc}") from exc
+        raise HTTPException(status_code=400, detail=f"Failed to read browser cookies: {exc}") from exc
     except Exception as exc:  # pragma: no cover - upstream exception types vary
-        raise HTTPException(status_code=400, detail=f"读取浏览器 cookies 失败：{exc}") from exc
+        raise HTTPException(status_code=400, detail=f"Failed to read browser cookies: {exc}") from exc
     return token
 
 
@@ -186,6 +195,7 @@ def select_download_options(
     downloadable_override: Optional[bool] = None,
     disabled_reason: Optional[str] = None,
 ) -> list[DownloadOption]:
+    ffmpeg_available = bool(shell_shutil.which("ffmpeg"))
     formats = info.get("formats") or []
     best_audio = None
     audio_only: list[dict[str, Any]] = []
@@ -225,6 +235,13 @@ def select_download_options(
     options: list[DownloadOption] = []
 
     for (height, ext), fmt in sorted(progressive_candidates.items(), key=_video_sort_key, reverse=True):
+        downloadable, item_disabled_reason = _resolve_downloadability(
+            fmt,
+            downloadable_override=downloadable_override,
+            requires_ffmpeg=False,
+            ffmpeg_available=ffmpeg_available,
+            disabled_reason=disabled_reason,
+        )
         options.append(
             DownloadOption(
                 key=f"prog-{fmt['format_id']}",
@@ -234,18 +251,26 @@ def select_download_options(
                 resolution=f"{height}p" if height else None,
                 fps=fmt.get("fps"),
                 filesize=fmt.get("filesize") or fmt.get("filesize_approx"),
-                note="单文件直下",
+                note="Single-file direct download",
                 protocol=fmt.get("protocol"),
                 delivery=_delivery_type(fmt),
+                delivery_label=_delivery_label(fmt),
                 strategy=strategy,
-                downloadable=_resolve_downloadable(fmt, downloadable_override),
-                disabled_reason=disabled_reason,
+                downloadable=downloadable,
+                disabled_reason=item_disabled_reason,
             )
         )
 
     if best_audio:
         for (height, ext), fmt in sorted(mux_candidates.items(), key=_video_sort_key, reverse=True):
             selector = f"{fmt['format_id']}+{best_audio['format_id']}"
+            downloadable, item_disabled_reason = _resolve_downloadability(
+                fmt,
+                downloadable_override=downloadable_override,
+                requires_ffmpeg=True,
+                ffmpeg_available=ffmpeg_available,
+                disabled_reason=disabled_reason,
+            )
             options.append(
                 DownloadOption(
                     key=f"mux-{fmt['format_id']}-{best_audio['format_id']}",
@@ -256,12 +281,13 @@ def select_download_options(
                     fps=fmt.get("fps"),
                     filesize=(fmt.get("filesize") or fmt.get("filesize_approx") or 0)
                     + (best_audio.get("filesize") or best_audio.get("filesize_approx") or 0),
-                    note="视频 + 最佳音频",
+                    note="Video + best audio",
                     protocol=fmt.get("protocol"),
                     delivery=_delivery_type(fmt),
+                    delivery_label=_delivery_label(fmt),
                     strategy=strategy,
-                    downloadable=_resolve_downloadable(fmt, downloadable_override),
-                    disabled_reason=disabled_reason,
+                    downloadable=downloadable,
+                    disabled_reason=item_disabled_reason,
                 )
             )
 
@@ -269,20 +295,28 @@ def select_download_options(
     for fmt in best_audio_formats:
         abr = fmt.get("abr")
         ext = fmt.get("ext") or "m4a"
+        downloadable, item_disabled_reason = _resolve_downloadability(
+            fmt,
+            downloadable_override=downloadable_override,
+            requires_ffmpeg=False,
+            ffmpeg_available=ffmpeg_available,
+            disabled_reason=disabled_reason,
+        )
         options.append(
             DownloadOption(
                 key=f"audio-{fmt['format_id']}",
-                label=f"音频 {int(abr) if abr else '?'}kbps ({ext.upper()})",
+                label=f"Audio {int(abr) if abr else '?'}kbps ({ext.upper()})",
                 selector=fmt["format_id"],
                 ext=ext,
                 filesize=fmt.get("filesize") or fmt.get("filesize_approx"),
-                note="仅音频",
+                note="Audio only",
                 kind="audio",
                 protocol=fmt.get("protocol"),
                 delivery=_delivery_type(fmt),
+                delivery_label=_delivery_label(fmt),
                 strategy=strategy,
-                downloadable=_resolve_downloadable(fmt, downloadable_override),
-                disabled_reason=disabled_reason,
+                downloadable=downloadable,
+                disabled_reason=item_disabled_reason,
             )
         )
 
@@ -325,7 +359,7 @@ def perform_download(
                 if not downloaded.exists():
                     candidates = sorted(target_dir.glob("*"), key=lambda item: item.stat().st_mtime, reverse=True)
                     if not candidates:
-                        raise ExtractionError("下载完成但没有找到输出文件")
+                        raise ExtractionError("Download finished but no output file was found")
                     downloaded = candidates[0]
 
                 if filename_hint:
@@ -350,8 +384,8 @@ def _video_sort_key(item: tuple[tuple[Optional[int], str], dict[str, Any]]) -> t
 
 
 def _video_label(height: Optional[int], ext: str, merged: bool) -> str:
-    resolution = f"{height}p" if height else "原始质量"
-    suffix = "完整视频" if merged else "高清合并"
+    resolution = f"{height}p" if height else "Source quality"
+    suffix = "Full video" if merged else "Muxed"
     return f"{resolution} ({ext.upper()}) {suffix}"
 
 
@@ -362,10 +396,42 @@ def _delivery_type(fmt: dict[str, Any]) -> str:
     return "direct"
 
 
-def _resolve_downloadable(fmt: dict[str, Any], downloadable_override: Optional[bool]) -> bool:
+def _delivery_label(fmt: dict[str, Any]) -> str:
+    protocol = (fmt.get("protocol") or "").lower()
+    if "m3u8" in protocol:
+        return "HLS m3u8"
+    if "mpd" in protocol or "dash" in protocol:
+        return "DASH / MPD"
+    if protocol:
+        return "Direct"
+    return "Downloadable"
+
+
+def _resolve_downloadability(
+    fmt: dict[str, Any],
+    *,
+    downloadable_override: Optional[bool],
+    requires_ffmpeg: bool,
+    ffmpeg_available: bool,
+    disabled_reason: Optional[str],
+) -> tuple[bool, Optional[str]]:
+    if disabled_reason:
+        return False, disabled_reason
+
     if downloadable_override is not None:
-        return downloadable_override
-    return _delivery_type(fmt) == "direct"
+        if downloadable_override and requires_ffmpeg and not ffmpeg_available:
+            return False, "This format requires ffmpeg for muxing. Install ffmpeg and retry."
+        if downloadable_override and _delivery_type(fmt) == "stream" and not ffmpeg_available:
+            return False, "This streaming format requires ffmpeg for stable downloads. Install ffmpeg and retry."
+        return downloadable_override, None if downloadable_override else "This format is currently unavailable for download."
+
+    if requires_ffmpeg and not ffmpeg_available:
+        return False, "This format requires ffmpeg for muxing. Install ffmpeg and retry."
+
+    if _delivery_type(fmt) == "stream" and not ffmpeg_available:
+        return False, "This streaming format requires ffmpeg for stable downloads. Install ffmpeg and retry."
+
+    return True, None
 
 
 def merge_download_options(primary: list[DownloadOption], secondary: list[DownloadOption]) -> list[DownloadOption]:
@@ -381,6 +447,39 @@ def merge_download_options(primary: list[DownloadOption], secondary: list[Downlo
     return merged
 
 
+def build_platform_warnings(
+    info: dict[str, Any],
+    request: ResolveRequest,
+    *,
+    provider_ready: bool = False,
+) -> list[str]:
+    warnings: list[str] = []
+    extractor_key = str(info.get("extractor_key") or "")
+    formats = info.get("formats") or []
+    has_stream_formats = any(_delivery_type(fmt) == "stream" for fmt in formats)
+    ffmpeg_available = bool(shell_shutil.which("ffmpeg"))
+
+    if extractor_key == "Youtube":
+        if provider_ready:
+            warnings.append("PO Token Provider is connected. High-resolution YouTube formats will attempt automatic authorization.")
+        else:
+            warnings.append("PO Token Provider is not connected. Only stable YouTube formats that do not require extra authorization will be offered.")
+
+    if request.cookie_source == "none" and extractor_key in COOKIE_RECOMMENDED_EXTRACTORS:
+        warnings.append(f"{extractor_key} content such as member-only, age-restricted, higher-quality, or geo-restricted media usually works better with browser cookies.")
+
+    if has_stream_formats:
+        if ffmpeg_available:
+            warnings.append("This site exposes HLS / DASH streaming formats. ffmpeg will be used for downloading and merging when needed.")
+        else:
+            warnings.append("This site exposes HLS / DASH streaming formats. Without ffmpeg, some formats will be disabled.")
+
+    if request.cookie_source == "browser" and request.auth_token:
+        warnings.append("Authentication has been cached. Downloads after this resolve step will not prompt for the browser keychain password again.")
+
+    return warnings
+
+
 def get_environment_status() -> EnvironmentResponse:
     extractors = list(list_extractors())
     extractor_count = len(extractors)
@@ -388,17 +487,17 @@ def get_environment_status() -> EnvironmentResponse:
         EnvironmentStatusItem(
             label="Deno",
             available=bool(shell_shutil.which("deno")),
-            detail="YouTube 新版解析建议安装，用于处理站点 JS 挑战",
+            detail="Recommended for newer YouTube extraction flows and site-side JavaScript challenges",
         ),
         EnvironmentStatusItem(
             label="ffmpeg",
             available=bool(shell_shutil.which("ffmpeg")),
-            detail="用于合并视频和音频，以及处理部分流媒体格式",
+            detail="Used for muxing audio/video and handling some streaming formats",
         ),
         EnvironmentStatusItem(
-            label="Cookies 缓存",
+            label="Cookie cache",
             available=True,
-            detail=f"已启用，同一条任务 {AUTH_TTL_SECONDS // 60} 分钟内复用认证，避免重复输密码",
+            detail=f"Enabled. Authentication is reused for {AUTH_TTL_SECONDS // 60} minutes to avoid repeated password prompts.",
         ),
         EnvironmentStatusItem(
             label="PO Token Provider",
@@ -406,14 +505,14 @@ def get_environment_status() -> EnvironmentResponse:
             detail=_provider_detail(),
         ),
         EnvironmentStatusItem(
-            label="yt-dlp 平台支持",
+            label="yt-dlp extractor coverage",
             available=True,
-            detail=f"当前版本内置约 {extractor_count} 个 extractor，可覆盖绝大多数 yt-dlp 支持站点",
+            detail=f"This version ships with about {extractor_count} extractors and covers most sites supported by yt-dlp.",
         ),
     ]
     return EnvironmentResponse(
         runtime=runtime,
-        support_summary="支持所有当前 yt-dlp 可解析平台，不只 YouTube。输入任意站点链接后会自动匹配对应 extractor。",
+        support_summary="Supports all platforms currently handled by yt-dlp, not just YouTube. The correct extractor is selected automatically from the URL.",
         extractor_count=extractor_count,
         featured_platforms=["YouTube", "Bilibili", "X/Twitter", "TikTok", "Instagram", "Facebook", "Twitch", "SoundCloud"],
     )
@@ -422,7 +521,7 @@ def get_environment_status() -> EnvironmentResponse:
 def _provider_detail() -> str:
     version = get_provider_plugin_version()
     if not version:
-        return "未安装 bgutil-ytdlp-pot-provider 插件"
+        return "bgutil-ytdlp-pot-provider is not installed"
     if is_provider_server_reachable():
-        return f"插件 {version} 已安装，provider server 已连接，高分辨率 YouTube 将自动尝试授权"
-    return f"插件 {version} 已安装，但 provider server 未连接"
+        return f"Plugin {version} is installed, the provider server is connected, and high-resolution YouTube authorization will be attempted automatically."
+    return f"Plugin {version} is installed, but the provider server is not connected."

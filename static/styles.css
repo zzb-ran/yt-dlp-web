@@ -269,14 +269,14 @@ textarea {
 }
 
 .runtime-card[data-available="true"] strong::after {
-  content: "可用";
+  content: "Available";
   margin-left: 10px;
   color: var(--success);
   font-size: 0.88rem;
 }
 
 .runtime-card[data-available="false"] strong::after {
-  content: "缺失";
+  content: "Missing";
   margin-left: 10px;
   color: var(--danger);
   font-size: 0.88rem;
@@ -410,6 +410,13 @@ textarea {
   border-radius: 18px;
   object-fit: cover;
   box-shadow: 0 16px 36px rgba(15, 23, 42, 0.14);
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.thumbnail:not(.is-cover) {
+  object-fit: contain;
+  padding: 18px;
 }
 
 .meta-copy h2 {

@@ -42,7 +42,7 @@ use_sudo() {
     if have_cmd sudo; then
       sudo "$@"
     else
-      fail "缺少 sudo，无法自动安装系统依赖: $*"
+      fail "sudo is required to install system dependencies automatically: $*"
     fi
   else
     "$@"
@@ -59,10 +59,10 @@ install_homebrew_if_needed() {
   if have_cmd brew; then
     return
   fi
-  log "未检测到 Homebrew，开始安装"
+  log "Homebrew not found, installing it now"
   NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
   refresh_shell_path
-  have_cmd brew || fail "Homebrew 安装失败，请手动安装后重试"
+  have_cmd brew || fail "Homebrew installation failed. Please install it manually and retry."
 }
 
 ensure_python_macos() {
@@ -70,7 +70,7 @@ ensure_python_macos() {
     return
   fi
   install_homebrew_if_needed
-  log "安装 Python 3.12 / Node / ffmpeg / deno / git"
+  log "Installing Python 3.12, Node.js, ffmpeg, Deno, and Git"
   brew install python@3.12 node ffmpeg deno git
 }
 
@@ -85,11 +85,11 @@ ensure_linux_deps() {
   elif have_cmd pacman; then
     use_sudo pacman -Sy --noconfirm python python-pip git curl ffmpeg nodejs npm
   else
-    fail "当前 Linux 发行版未检测到受支持的包管理器（apt/dnf/yum/pacman）"
+    fail "Unsupported Linux package manager. Supported: apt, dnf, yum, pacman."
   fi
 
   if ! have_cmd deno; then
-    log "安装 Deno"
+    log "Installing Deno"
     curl -fsSL https://deno.land/install.sh | sh
     export DENO_INSTALL="${HOME}/.deno"
     export PATH="${DENO_INSTALL}/bin:${PATH}"
@@ -97,17 +97,17 @@ ensure_linux_deps() {
 }
 
 ensure_node_version() {
-  have_cmd node || fail "未检测到 node，请先安装 Node.js >= 20"
-  have_cmd npm || fail "未检测到 npm，请重新安装 Node.js"
+  have_cmd node || fail "Node.js was not found. Install Node.js 20+ and retry."
+  have_cmd npm || fail "npm was not found. Reinstall Node.js and retry."
   local major
   major="$(node -p "process.versions.node.split('.')[0]")"
   if [[ "${major}" -lt 20 ]]; then
-    fail "当前 Node.js 版本过低（$(node --version)），需要 >= 20"
+    fail "Node.js $(node --version) is too old. Version 20+ is required."
   fi
 }
 
 ensure_python_version() {
-  find_python_bin || fail "未检测到可用的 Python 3.12+，请安装后重试"
+  find_python_bin || fail "Python 3.12+ was not found. Please install it and retry."
 }
 
 ensure_system_deps() {
@@ -122,39 +122,39 @@ ensure_system_deps() {
       ensure_linux_deps
       ;;
     *)
-      fail "当前脚本只支持 macOS / Linux，Windows 请使用 start.ps1 或 start.cmd"
+      fail "This script supports only macOS and Linux. Use start.ps1 or start.cmd on Windows."
       ;;
   esac
 
   refresh_shell_path
   ensure_python_version
   ensure_node_version
-  have_cmd ffmpeg || fail "缺少 ffmpeg，请安装后重试"
-  have_cmd git || fail "缺少 git，请安装后重试"
-  have_cmd deno || fail "缺少 deno，请安装后重试"
-  [[ -d "${PROVIDER_SERVER_DIR}" ]] || fail "缺少 provider 目录: ${PROVIDER_SERVER_DIR}"
+  have_cmd ffmpeg || fail "ffmpeg was not found. Install it and retry."
+  have_cmd git || fail "Git was not found. Install it and retry."
+  have_cmd deno || fail "Deno was not found. Install it and retry."
+  [[ -d "${PROVIDER_SERVER_DIR}" ]] || fail "Provider directory is missing: ${PROVIDER_SERVER_DIR}"
 }
 
 create_venv_if_needed() {
   if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-    log "创建 Python 虚拟环境（${PYTHON_BIN}）"
+    log "Creating Python virtual environment with ${PYTHON_BIN}"
     "${PYTHON_BIN}" -m venv "${VENV_DIR}"
   fi
 }
 
 install_python_deps() {
-  log "安装 Python 依赖"
+  log "Installing Python dependencies"
   "${VENV_DIR}/bin/python" -m pip install --upgrade pip
   "${VENV_DIR}/bin/pip" install -r "${ROOT_DIR}/requirements.txt"
 }
 
 install_provider_server() {
-  log "安装并编译 bgutil provider server"
+  log "Installing and building the bgutil provider server"
   (cd "${PROVIDER_SERVER_DIR}" && npm ci && npx tsc)
 }
 
 start_server() {
-  log "启动服务 http://${HOST}:${PORT}"
+  log "Starting app at http://${HOST}:${PORT}"
   exec "${VENV_DIR}/bin/uvicorn" app.main:app --host "${HOST}" --port "${PORT}"
 }
 

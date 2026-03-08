@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import math
 import shutil
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
@@ -23,7 +27,7 @@ from .models import (
     VideoSummary,
 )
 from .provider import ensure_provider_server, is_provider_ready, stop_provider_server
-from .services import ExtractionError, SUPPORTED_BROWSERS, extract_media_info, extract_public_youtube_info, get_environment_status, merge_download_options, perform_download, select_download_options
+from .services import ExtractionError, SUPPORTED_BROWSERS, build_platform_warnings, extract_media_info, extract_public_youtube_info, get_environment_status, merge_download_options, perform_download, select_download_options
 from .services import cache_browser_cookies, cleanup_expired_auth_tokens
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -47,10 +51,40 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/api/thumbnail")
+def thumbnail_proxy(
+    url: str = Query(min_length=1),
+    referer: str | None = Query(default=None),
+) -> Response:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="Unsupported thumbnail URL protocol")
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        )
+    }
+    if referer:
+        referer_parsed = urlparse(referer)
+        if referer_parsed.scheme in {"http", "https"}:
+            headers["Referer"] = referer
+
+    request = Request(url, headers=headers)
+    try:
+        with urlopen(request, timeout=12) as upstream:
+            content_type = upstream.headers.get_content_type() or "image/jpeg"
+            body = upstream.read()
+            return Response(content=body, media_type=content_type)
+    except (HTTPError, URLError) as exc:
+        raise HTTPException(status_code=502, detail=f"Thumbnail fetch failed: {exc}") from exc
+
+
 @app.get("/api/auth/capabilities", response_model=AuthCapabilitiesResponse)
 def auth_capabilities() -> AuthCapabilitiesResponse:
     return AuthCapabilitiesResponse(
-        oauth_message="截至 2026-03-08，yt-dlp 官方已说明 YouTube OAuth 因站点限制不可用，请改用浏览器 cookies。",
+        oauth_message="As of 2026-03-08, yt-dlp documents that YouTube OAuth is currently unusable because of site-side restrictions. Use browser cookies instead.",
         browsers=[AuthBrowserOption(value=value, label=label) for value, label in SUPPORTED_BROWSERS],
     )
 
@@ -76,8 +110,8 @@ def resolve_video(payload: ResolveRequest) -> ResolveResponse:
     except ExtractionError as exc:
         message = str(exc)
         if "Requested format is not available" in message:
-            message = "解析阶段被本机 yt-dlp 配置或站点返回格式影响。服务现已忽略本机配置，请刷新页面后重试；如果仍失败，先安装 Deno，再尝试切换 cookies 浏览器。"
-        raise HTTPException(status_code=400, detail=f"解析失败：{message}") from exc
+            message = "Format discovery was affected by local yt-dlp config or site-side format changes. Local config is already ignored here; refresh and retry. If it still fails, install Deno and try another browser cookie source."
+        raise HTTPException(status_code=400, detail=f"Resolve failed: {message}") from exc
 
     formats = select_download_options(
         info,
@@ -104,7 +138,7 @@ def resolve_video(payload: ResolveRequest) -> ResolveResponse:
                         item.model_copy(
                             update={
                                 "downloadable": False,
-                                "disabled_reason": "当前 YouTube 这档清晰度需要额外 PO Token 或 provider，暂时不提供直下",
+                                "disabled_reason": "This YouTube quality currently requires an additional PO Token or provider and is temporarily unavailable for direct download.",
                             }
                         )
                         for item in formats
@@ -115,22 +149,16 @@ def resolve_video(payload: ResolveRequest) -> ResolveResponse:
             except ExtractionError:
                 pass
     if not formats:
-        raise HTTPException(status_code=400, detail="没有找到可用的下载格式")
+        raise HTTPException(status_code=400, detail="No downloadable formats were found")
 
-    warnings: list[str] = []
-    if info.get("extractor_key") == "Youtube":
-        if provider_ready:
-            warnings.append("PO Token Provider 已连接，YouTube 高分辨率会自动尝试授权。")
-        else:
-            warnings.append("PO Token Provider 当前未连接，因此仅会稳定提供无需额外授权的 YouTube 格式。")
-    if auth_token:
-        warnings.append("当前认证已暂存，本次解析后下载不会再次读取浏览器密码。")
+    warning_payload = payload.model_copy(update={"auth_token": auth_token})
+    warnings = build_platform_warnings(info, warning_payload, provider_ready=provider_ready)
 
     return ResolveResponse(
         video=VideoSummary(
             title=info.get("title") or "Untitled",
             uploader=info.get("uploader"),
-            duration=info.get("duration"),
+            duration=_coerce_duration(info.get("duration")),
             thumbnail=info.get("thumbnail"),
             webpage_url=info.get("webpage_url"),
             extractor=info.get("extractor_key"),
@@ -152,8 +180,8 @@ def download_video(payload: DownloadRequest) -> FileResponse:
     except ExtractionError as exc:
         message = str(exc)
         if "Requested format is not available" in message:
-            message = "当前清晰度在重新下载时不可用，通常是站点格式变化、缺少 cookies，或本机缺少 ffmpeg / Deno。请重新解析后换一个格式再试。"
-        raise HTTPException(status_code=400, detail=f"下载失败：{message}") from exc
+            message = "The selected format is no longer available for download. This is usually caused by site-side format changes, missing cookies, or a missing ffmpeg/Deno dependency. Resolve again and choose another format."
+        raise HTTPException(status_code=400, detail=f"Download failed: {message}") from exc
 
     return FileResponse(
         downloaded,
@@ -194,13 +222,13 @@ def get_download_job_file(job_id: str) -> FileResponse:
     with DOWNLOAD_JOBS_LOCK:
         job = DOWNLOAD_JOBS.get(job_id)
         if not job:
-            raise HTTPException(status_code=404, detail="下载任务不存在")
+            raise HTTPException(status_code=404, detail="Download job was not found")
         if job["status"] != "completed" or not job["file_path"]:
-            raise HTTPException(status_code=409, detail="文件尚未准备好")
+            raise HTTPException(status_code=409, detail="Downloaded file is not ready yet")
         file_path = Path(job["file_path"])
 
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail="下载文件不存在")
+        raise HTTPException(status_code=404, detail="Downloaded file no longer exists")
 
     return FileResponse(file_path, filename=file_path.name, media_type="application/octet-stream")
 
@@ -273,8 +301,19 @@ def _job_response(job_id: str) -> DownloadJobResponse:
     with DOWNLOAD_JOBS_LOCK:
         job = DOWNLOAD_JOBS.get(job_id)
         if not job:
-            raise HTTPException(status_code=404, detail="下载任务不存在")
+            raise HTTPException(status_code=404, detail="Download job was not found")
         return DownloadJobResponse(job_id=job_id, **{key: value for key, value in job.items() if key != "file_path"})
+
+
+def _coerce_duration(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return max(0, int(math.floor(value)))
+    try:
+        return max(0, int(math.floor(float(value))))
+    except (TypeError, ValueError):
+        return None
 
 
 @app.on_event("shutdown")

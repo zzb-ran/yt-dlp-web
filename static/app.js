@@ -27,6 +27,15 @@ const AUTH_CACHE_KEY = "ytfetch_auth_cache";
 let lastPayload = null;
 let activeDownloadPoll = null;
 
+async function parseApiResponse(response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+  const text = await response.text();
+  return { detail: text || `Request failed (${response.status})` };
+}
+
 function setStatus(message) {
   statusNode.textContent = message || "";
 }
@@ -37,7 +46,7 @@ function resetProgress() {
   progressStatusText.textContent = "";
   progressBarFill.style.width = "0%";
   progressPercent.textContent = "0%";
-  progressDetail.textContent = "等待下载";
+  progressDetail.textContent = "Waiting for download";
 }
 
 function updateProgress(job) {
@@ -47,21 +56,21 @@ function updateProgress(job) {
   progressBarFill.style.width = `${percent}%`;
   progressPercent.textContent = `${percent.toFixed(percent >= 100 ? 0 : 1)}%`;
   progressStatusText.textContent = ({
-    queued: "任务已创建，等待开始",
-    downloading: "正在下载中",
-    completed: "下载成功，文件已准备完成",
-    failed: "下载失败",
-  })[job.status] || "处理中";
+    queued: "Job created, waiting to start",
+    downloading: "Downloading",
+    completed: "Download complete, file is ready",
+    failed: "Download failed",
+  })[job.status] || "Processing";
 
   const parts = [];
   if (job.status === "completed" && job.filename) {
-    parts.push(`文件 ${job.filename}`);
+    parts.push(`File ${job.filename}`);
   }
   if (job.downloaded_bytes) {
     parts.push(humanSize(job.downloaded_bytes));
   }
   if (job.total_bytes) {
-    parts.push(`总计 ${humanSize(job.total_bytes)}`);
+    parts.push(`Total ${humanSize(job.total_bytes)}`);
   }
   if (job.speed) {
     parts.push(`${humanSize(job.speed)}/s`);
@@ -72,7 +81,7 @@ function updateProgress(job) {
   if (job.error) {
     parts.push(job.error);
   }
-  progressDetail.textContent = parts.join(" · ") || "等待下载";
+  progressDetail.textContent = parts.join(" · ") || "Waiting for download";
 }
 
 function setWarnings(messages = []) {
@@ -150,10 +159,23 @@ function renderResult(data) {
   videoSubtitle.textContent = [video.uploader, formatDuration(video.duration)].filter(Boolean).join(" / ");
 
   if (video.thumbnail) {
-    thumbnail.src = video.thumbnail;
+    const thumbnailUrl = new URL("/api/thumbnail", window.location.origin);
+    thumbnailUrl.searchParams.set("url", video.thumbnail);
+    if (video.webpage_url) {
+      thumbnailUrl.searchParams.set("referer", video.webpage_url);
+    }
+    thumbnail.onerror = () => {
+      thumbnail.src = "/assets/logo.svg";
+      thumbnail.classList.remove("is-cover");
+      thumbnail.onerror = null;
+    };
+    thumbnail.src = thumbnailUrl.toString();
+    thumbnail.classList.add("is-cover");
     thumbnail.classList.remove("hidden");
   } else {
+    thumbnail.onerror = null;
     thumbnail.classList.add("hidden");
+    thumbnail.classList.remove("is-cover");
   }
 
   renderVideoTags(video);
@@ -164,7 +186,7 @@ function renderResult(data) {
 
 function renderVideoTags(video) {
   videoTags.innerHTML = "";
-  [video.platform, video.extractor, video.webpage_url ? "支持下载" : null].filter(Boolean).forEach((item) => {
+  [video.platform, video.extractor, video.webpage_url ? "Download supported" : null].filter(Boolean).forEach((item) => {
     const chip = document.createElement("span");
     chip.className = "chip";
     chip.textContent = item;
@@ -180,7 +202,7 @@ function renderFormatButtons(formats) {
   audioFormatGrid.innerHTML = "";
 
   if (videos.length === 0) {
-    videoFormatGrid.appendChild(createEmptyState("当前链接没有可直接下载的视频格式。"));
+    videoFormatGrid.appendChild(createEmptyState("No downloadable video formats were returned for this URL."));
   } else {
     videos.forEach((format, index) => {
       videoFormatGrid.appendChild(createFormatCard(format, index === 0));
@@ -188,7 +210,7 @@ function renderFormatButtons(formats) {
   }
 
   if (audios.length === 0) {
-    audioFormatGrid.appendChild(createEmptyState("当前站点这次没有返回可单独下载的音频格式。"));
+    audioFormatGrid.appendChild(createEmptyState("No standalone audio formats were returned for this site in this request."));
   } else {
     audios.forEach((format) => {
       audioFormatGrid.appendChild(createFormatCard(format, false));
@@ -234,7 +256,7 @@ function createFormatCard(format, primary = false) {
   button.innerHTML = `
     <div class="format-top">
       <span class="format-title">${format.resolution || format.label}</span>
-      <span class="chip">${format.downloadable === false ? "受限" : format.delivery === "stream" ? "流媒体 m3u8" : "直链"}</span>
+      <span class="chip">${format.downloadable === false ? "Restricted" : format.delivery_label || (format.delivery === "stream" ? "Streaming" : "Direct")}</span>
     </div>
     <div class="format-sub">${format.label}</div>
     <div class="format-meta">${[
@@ -292,9 +314,9 @@ function formatEta(seconds) {
   const mins = Math.floor(total / 60);
   const secs = Math.floor(total % 60);
   if (mins > 0) {
-    return `${mins}分${secs}秒`;
+    return `${mins}m ${secs}s`;
   }
-  return `${secs}秒`;
+  return `${secs}s`;
 }
 
 async function resolveVideo(event) {
@@ -303,7 +325,7 @@ async function resolveVideo(event) {
   resultNode.classList.add("hidden");
   resetProgress();
   setWarnings([]);
-  setStatus("正在解析可用格式...");
+  setStatus("Resolving available formats...");
 
   const payload = {
     url: document.getElementById("url").value.trim(),
@@ -324,9 +346,9 @@ async function resolveVideo(event) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const data = await response.json();
+    const data = await parseApiResponse(response);
     if (!response.ok) {
-      throw new Error(data.detail || "解析失败");
+      throw new Error(data.detail || "Resolve failed");
     }
 
     renderResult(data);
@@ -335,12 +357,12 @@ async function resolveVideo(event) {
       writeAuthCache({ browser: payload.browser, auth_token: data.auth_token });
     }
     setWarnings(data.warnings || []);
-    setStatus(`已找到 ${data.formats.length} 个可下载格式。`);
+    setStatus(`Found ${data.formats.length} downloadable formats.`);
   } catch (error) {
-    if ((error.message || "").includes("认证缓存已过期")) {
+    if ((error.message || "").includes("Cached authentication has expired")) {
       clearAuthCache();
     }
-    setStatus(error.message || "解析失败");
+    setStatus(error.message || "Resolve failed");
   } finally {
     resolveButton.disabled = false;
   }
@@ -348,7 +370,7 @@ async function resolveVideo(event) {
 
 async function downloadFormat(format) {
   if (!lastPayload || !format) {
-    setStatus("请先解析链接。");
+    setStatus("Resolve the link first.");
     return;
   }
 
@@ -357,7 +379,7 @@ async function downloadFormat(format) {
     activeDownloadPoll = null;
   }
 
-  setStatus("正在创建下载任务...");
+  setStatus("Creating download job...");
   progressPanel.classList.remove("hidden");
   updateProgress({ status: "queued", progress: 0, downloaded_bytes: 0, total_bytes: null, speed: null, eta: null });
 
@@ -376,7 +398,7 @@ async function downloadFormat(format) {
     });
 
     if (!response.ok) {
-      let message = "下载失败";
+      let message = "Download failed";
       try {
         const error = await response.json();
         message = error.detail || message;
@@ -388,23 +410,23 @@ async function downloadFormat(format) {
 
     const job = await response.json();
     updateProgress(job);
-    setStatus("下载任务已开始。");
+    setStatus("Download job started.");
     activeDownloadPoll = window.setInterval(() => pollDownloadJob(job.job_id), 1000);
   } catch (error) {
-    if ((error.message || "").includes("认证缓存已过期")) {
+    if ((error.message || "").includes("Cached authentication has expired")) {
       clearAuthCache();
     }
-    setStatus(error.message || "下载失败");
-    updateProgress({ status: "failed", progress: 0, error: error.message || "下载失败" });
+    setStatus(error.message || "Download failed");
+    updateProgress({ status: "failed", progress: 0, error: error.message || "Download failed" });
   }
 }
 
 async function pollDownloadJob(jobId) {
   try {
     const response = await fetch(`/api/download-jobs/${jobId}`);
-    const job = await response.json();
+    const job = await parseApiResponse(response);
     if (!response.ok) {
-      throw new Error(job.detail || "获取下载进度失败");
+      throw new Error(job.detail || "Failed to fetch download progress");
     }
     updateProgress(job);
 
@@ -419,7 +441,7 @@ async function pollDownloadJob(jobId) {
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
-      setStatus(`下载成功：${job.filename || "文件已准备好"}，浏览器已开始保存。`);
+      setStatus(`Download complete: ${job.filename || "file ready"}. The browser save flow has started.`);
     }
 
     if (job.status === "failed") {
@@ -427,14 +449,14 @@ async function pollDownloadJob(jobId) {
         window.clearInterval(activeDownloadPoll);
         activeDownloadPoll = null;
       }
-      setStatus(job.error || "下载失败");
+      setStatus(job.error || "Download failed");
     }
   } catch (error) {
     if (activeDownloadPoll) {
       window.clearInterval(activeDownloadPoll);
       activeDownloadPoll = null;
     }
-    setStatus(error.message || "获取下载进度失败");
+    setStatus(error.message || "Failed to fetch download progress");
   }
 }
 
@@ -444,8 +466,8 @@ form.addEventListener("submit", resolveVideo);
 toggleAuthFields();
 resetProgress();
 loadCapabilities().catch(() => {
-  oauthTip.textContent = "认证能力加载失败，默认仍可直接解析公开资源。";
+  oauthTip.textContent = "Failed to load authentication capabilities. Public resources can still be resolved.";
 });
 loadEnvironment().catch(() => {
-  supportSummary.textContent = "环境信息加载失败，但基础解析功能仍可使用。";
+  supportSummary.textContent = "Failed to load environment details, but the core resolve flow is still available.";
 });

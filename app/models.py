@@ -31,6 +31,7 @@ class DownloadOption(BaseModel):
     kind: Literal["video", "audio"] = "video"
     protocol: Optional[str] = None
     delivery: Literal["direct", "stream"] = "direct"
+    delivery_label: Optional[str] = None
     strategy: Literal["default", "youtube_android_public"] = "default"
     downloadable: bool = True
     disabled_reason: Optional[str] = None
